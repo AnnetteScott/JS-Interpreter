@@ -1,8 +1,8 @@
 #lang eopl
 
 ;; =========================================
-;; AJS Interpreter — Part 2:
-;; Arithmetic + Constants + Functions
+;; AJS Interpreter — Part 3:
+;; Booleans + Conditionals
 ;; =========================================
 
 ;; -------- Lexer --------
@@ -12,7 +12,9 @@
     ;; numbers
     (number (digit (arbno digit)) number)
     (number ((arbno digit) "." digit (arbno digit)) number)
-    ;; identifiers: [A-Za-z][A-Za-z0-9_]*  (allow underscore after first letter)
+    ;; booleans: return 'true or 'false as symbols
+    (bool ((or "true" "false")) symbol)
+    ;; identifiers: [A-Za-z][A-Za-z0-9_]* (allow underscore after first letter)
     (identifier
      ((or
        "a" "b" "c" "d" "e" "f" "g" "h" "i" "j" "k" "l" "m" "n" "o" "p" "q" "r"
@@ -47,18 +49,45 @@
       ("function" identifier "(" (separated-list identifier ",") ")"
        "{" "return" expression ";" "}") a-fun-decl)
 
-    ;; Expressions
-    (expression (term expression+) an-expr)
-    (expression+ ("+" term expression+) add-expr)
-    (expression+ ("-" term expression+) sub-expr)
-    (expression+ () empty-expr)
+    ;; -------- Expressions with booleans/conditionals --------
+(expression (additive maybe-ternary) an-expr)
 
+(maybe-ternary ("?" expression ":" expression) ternary-expr)
+(maybe-ternary () no-ternary)
+
+;; logical OR / AND
+(additive (logic-or additive+) a-additive)
+(additive+ ("+" logic-or additive+) add-more)
+(additive+ ("-" logic-or additive+) sub-more)
+(additive+ () no-add)
+
+(logic-or (logic-and logic-or+) a-logic-or)
+(logic-or+ ("||" logic-and logic-or+) or-more)
+(logic-or+ () no-or)
+
+(logic-and (comparison logic-and+) a-logic-and)
+(logic-and+ ("&&" comparison logic-and+) and-more)
+(logic-and+ () no-and)
+
+
+    ;; comparisons
+    (comparison (term maybe-comp) a-comparison)
+    (maybe-comp (">" term) gt-comp)
+    (maybe-comp ("<" term) lt-comp)
+    (maybe-comp (">=" term) ge-comp)
+    (maybe-comp ("<=" term) le-comp)
+    (maybe-comp ("===" term) eq-comp)
+    (maybe-comp ("!=" term) ne-comp)
+    (maybe-comp () no-comp)
+
+    ;; arithmetic terms
     (term (factor term+) a-term)
     (term+ ("*" factor term+) mul-term)
     (term+ ("/" factor term+) div-term)
     (term+ () empty-term)
 
     (factor (number) num-factor)
+    (factor (bool) bool-factor)
     (factor (identifier id-tail) id-or-call)
     (factor ("(" expression ")") group-factor)
     (factor ("-" factor) neg-factor)
@@ -130,10 +159,8 @@
 (define value-of-toplevel
   (lambda (it env)
     (cases toplevel it
-      [stmt-item (st)
-        (value-of-statement st env)]
-      [fun-item (fd)
-        (value-of-fun-decl fd env)])))
+      [stmt-item (st) (value-of-statement st env)]
+      [fun-item (fd) (value-of-fun-decl fd env)])))
 
 (define value-of-fun-decl
   (lambda (fd env)
@@ -152,21 +179,84 @@
         (cons (->js (value-of-expr e env)) env)])))
 
 ;; -------- Expression evaluation --------
+
 (define value-of-expr
   (lambda (e env)
     (cases expression e
-      [an-expr (t e+)
-        (value-of-expr+ (value-of-term t env) e+ env)])))
+      [an-expr (add ternary)
+        (let ([val (value-of-additive add env)])
+          (cases maybe-ternary ternary
+            [ternary-expr (true-expr false-expr)
+              (if (truthy? val)
+                  (value-of-expr true-expr env)
+                  (value-of-expr false-expr env))]
+            [no-ternary () val]))])))
 
-(define value-of-expr+
-  (lambda (acc e+ env)
-    (cases expression+ e+
-      [add-expr (t rest)
-        (value-of-expr+ (+ acc (value-of-term t env)) rest env)]
-      [sub-expr (t rest)
-        (value-of-expr+ (- acc (value-of-term t env)) rest env)]
-      [empty-expr () acc])))
+(define value-of-logic-or
+  (lambda (e env)
+    (cases logic-or e
+      [a-logic-or (left rest)
+        (let ([v (value-of-logic-and left env)])
+          (value-of-logic-or+ v rest env))])))
 
+(define value-of-logic-or+
+  (lambda (left rest env)
+    (cases logic-or+ rest
+      [or-more (right tail)
+        (if (truthy? left)
+            #t
+            (value-of-logic-or+ (value-of-logic-and right env) tail env))]
+      [no-or () left])))
+
+(define value-of-logic-and
+  (lambda (e env)
+    (cases logic-and e
+      [a-logic-and (left rest)
+        (let ([v (value-of-comparison left env)])
+          (value-of-logic-and+ v rest env))])))
+
+(define value-of-logic-and+
+  (lambda (left rest env)
+    (cases logic-and+ rest
+      [and-more (right tail)
+        (if (not (truthy? left))
+            #f
+            (value-of-logic-and+ (value-of-comparison right env) tail env))]
+      [no-and () left])))
+
+(define value-of-additive
+  (lambda (e env)
+    (cases additive e
+      [a-additive (left rest)
+        (let ([v (value-of-logic-or left env)])
+          (value-of-additive+ v rest env))])))
+
+(define value-of-additive+
+  (lambda (left rest env)
+    (cases additive+ rest
+      [add-more (right tail)
+        (value-of-additive+ (+ left (value-of-logic-or right env)) tail env)]
+      [sub-more (right tail)
+        (value-of-additive+ (- left (value-of-logic-or right env)) tail env)]
+      [no-add () left])))
+
+
+(define value-of-comparison
+  (lambda (e env)
+    (cases comparison e
+      [a-comparison (t maybe)
+        (let ([v1 (value-of-term t env)])
+          (cases maybe-comp maybe
+            [gt-comp (t2)  (> v1 (value-of-term t2 env))]
+            [lt-comp (t2)  (< v1 (value-of-term t2 env))]
+            [ge-comp (t2)  (>= v1 (value-of-term t2 env))]
+            [le-comp (t2)  (<= v1 (value-of-term t2 env))]
+            [eq-comp (t2)  (equal? v1 (value-of-term t2 env))]
+            [ne-comp (t2)  (not (equal? v1 (value-of-term t2 env)))]
+            [no-comp () v1]))])))
+
+
+;; -------- Arithmetic evaluation --------
 (define value-of-term
   (lambda (tm env)
     (cases term tm
@@ -186,16 +276,20 @@
   (lambda (f env)
     (cases factor f
       [num-factor (n) n]
+      [bool-factor (b) (if (eq? b 'true) #t #f)]
       [group-factor (e) (value-of-expr e env)]
       [neg-factor (g) (- (value-of-factor g env))]
       [id-or-call (id tail)
         (cases id-tail tail
-          [empty-id-tail ()
-            (apply-env env id)]
+          [empty-id-tail () (apply-env env id)]
           [call-tail (args)
             (let* ([proc-val (apply-env env id)]
                    [arg-vals (map (lambda (a) (value-of-expr a env)) args)])
               (apply-proc proc-val arg-vals))])])))
+
+;; -------- Boolean helpers --------
+(define (truthy? v)
+  (and v (not (eq? v #f))))
 
 ;; -------- Procedure application --------
 (define apply-proc
@@ -209,11 +303,9 @@
           (->js (value-of-expr body new-env)))])))
 
 ;; -------- Runner / REPL --------
-
 (define (ajs-run s)
   (value-of-program (scan&parse s)))
 
-;; Read all characters until EOF (EOPL-safe)
 (define (read-all)
   (let loop ([chars '()])
     (let ([c (read-char)])
@@ -227,7 +319,7 @@
          [vals (value-of-program pgm)])
     (for-each
      (lambda (v)
-       (unless (proc? v)         ; don't show closure values
+       (unless (proc? v)
          (display v)
          (newline)))
      vals)))

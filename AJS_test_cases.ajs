@@ -106,7 +106,7 @@ function close_enough(x, y) {
 }
 
 close_enough(12.0003, 12);
-close_enought(12.1, 12);
+close_enough(12.1, 12);
 
 
 //==========================
