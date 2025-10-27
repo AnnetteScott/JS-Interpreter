@@ -401,6 +401,8 @@
                   (string-append acc sep (car ss)))))))
 
 
+;; -------- REPL (expression results only) --------
+;; -------- REPL (expression results only) --------
 (define (REPL)
   (let* ([input (read-all)]
          [pgm (scan&parse input)]
@@ -408,20 +410,10 @@
     (for-each
      (lambda (v)
        (cond
-         [(proc? v)
-          (cases proc v
-            [closure (name params body env)
-              (display "function ")
-              (display (symbol->string name))
-              (display "(")
-              (display (string-join (map symbol->string params) ", "))
-              (display ") defined")
-              (newline)])]
-         [(pair? v)
-          (display (symbol->string (car v)))
-          (display " = ")
-          (display (cdr v))
-          (newline)]
+         ;; Skip functions and declarations (return pairs)
+         [(proc? v) '()]
+         [(pair? v) '()]
+         ;; Only print pure evaluated values
          [else
           (display v)
           (newline)]))
