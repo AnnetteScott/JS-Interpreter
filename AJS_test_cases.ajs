@@ -134,3 +134,39 @@ function fib(n) {
 fib(4);
 fib(8);
 
+//==============================
+// Test if / else
+//==============================
+
+const x = 10;
+if (x > 5) { 
+	100; 
+} 
+else { 
+	0; 
+}
+
+if (x < 5) { 
+	111; 
+} 
+else if (x === 10) { 
+	222; 
+} else {
+	333; 
+}
+
+const y = -3;
+if (! (y > 0)) { 999; } else { 0; }
+
+//==============================
+// Nested block and variable scope
+//==============================
+
+const outer = 5;
+if (outer === 5) {
+    const inner = 2;
+    inner * outer;
+} else {
+    0;
+}
+

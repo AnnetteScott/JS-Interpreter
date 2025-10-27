@@ -36,13 +36,36 @@
   '(
     (program ((arbno toplevel)) a-program)
 
-    ;; A toplevel item can be either a statement ending with ";" or a function decl
-    (toplevel (statement ";") stmt-item)
+    ;; Top-level accepts either:
+    ;;   - a simple statement followed by ";"
+    ;;   - a compound statement (no ";")
+    (toplevel (simple-stmt ";") top-simple)
+    (toplevel (compound-stmt) top-comp)
     (toplevel (fun-decl) fun-item)
 
-    ;; Statements
-    (statement ("const" identifier "=" expression) const-decl)
-    (statement (expression) expr-stmt)
+    ;; Simple statements (must end with ";")
+    (simple-stmt ("const" identifier "=" expression) const-decl)
+    (simple-stmt (expression) expr-stmt)
+
+    ;; Compound statements (no trailing ";")
+    (compound-stmt ("if" "(" expression ")" block opt-else) if-stmt)
+    (compound-stmt (block) block-stmt)
+
+    ;; Left-factored optional else to avoid LL(1) conflict on "else"
+    (opt-else ("else" else-body) else-some)
+    (opt-else () no-else)
+
+    ;; After "else", we either have a block or a nested if
+    (else-body (block) else-block)
+    (else-body (nested-if) else-if)
+
+    ;; Nested if is itself a compound shape
+    (nested-if ("if" "(" expression ")" block opt-else) nested-if-stmt)
+
+    ;; Blocks contain a sequence of either simple-stmt ";" or compound-stmt
+    (block ("{" (arbno block-item) "}") a-block)
+    (block-item (simple-stmt ";") blk-simple)
+    (block-item (compound-stmt) blk-comp)
 
     ;; Function declarations (no trailing semicolon!)
     (fun-decl
@@ -91,6 +114,7 @@
     (factor (identifier id-tail) id-or-call)
     (factor ("(" expression ")") group-factor)
     (factor ("-" factor) neg-factor)
+    (factor ("!" factor) not-factor)
 
     (id-tail ("(" (separated-list expression ",") ")") call-tail)
     (id-tail () empty-id-tail)
@@ -160,28 +184,84 @@
 (define value-of-toplevel
   (lambda (it env)
     (cases toplevel it
-      [stmt-item (st) (value-of-statement st env)]
-      [fun-item (fd) (value-of-fun-decl fd env)])))
+      [top-simple (st) (value-of-simple-stmt st env)]
+      [top-comp   (cs) (value-of-compound-stmt cs env)]
+      [fun-item   (fd) (value-of-fun-decl fd env)])))
 
 (define value-of-fun-decl
   (lambda (fd env)
     (cases fun-decl fd
       [a-fun-decl (id params body)
-        ;; Create closure first (temporarily) — placeholder for recursion.
-        (letrec ([val (closure id params body env)]) ; recursive self-binding
+        ;; Self-binding closure for recursion
+        (letrec ([val (closure id params body env)])
           (cons val (extend-env id val env)))])))
 
-(define value-of-statement
+;; ----- Blocks -----
+(define value-of-block
+  (lambda (blk env)
+    (cases block blk
+      [a-block (items)
+        (value-of-block-items items env)])))
+
+(define value-of-block-items
+  (lambda (items env)
+    (if (null? items)
+        (cons #f env)
+        (let* ([first (car items)]
+               [rest  (cdr items)]
+               [res+env (value-of-block-item first env)]
+               [val     (car res+env)]
+               [new-env (cdr res+env)])
+          (if (null? rest)
+              (cons val new-env)
+              (value-of-block-items rest new-env))))))
+
+(define value-of-block-item
+  (lambda (bi env)
+    (cases block-item bi
+      [blk-simple (st) (value-of-simple-stmt st env)]
+      [blk-comp   (cs) (value-of-compound-stmt cs env)])))
+
+;; ----- Statements -----
+(define value-of-simple-stmt
   (lambda (st env)
-    (cases statement st
+    (cases simple-stmt st
       [const-decl (id exp)
         (let ([val (->js (value-of-expr exp env))])
           (cons val (extend-env id val env)))]
       [expr-stmt (e)
         (cons (->js (value-of-expr e env)) env)])))
 
-;; -------- Expression evaluation --------
+(define value-of-compound-stmt
+  (lambda (cs env)
+    (cases compound-stmt cs
+      [if-stmt (test blk opt)
+        (let ([cond (value-of-expr test env)])
+          (if (truthy? cond)
+              (value-of-block blk env)
+              (cases opt-else opt
+                [else-some (eb)
+                  (cases else-body eb
+                    [else-block (b2) (value-of-block b2 env)]
+                    [else-if   (nested) (value-of-nested-if nested env)])]
+                [no-else () (cons #f env)])))]
+      [block-stmt (blk) (value-of-block blk env)])))
 
+(define value-of-nested-if
+  (lambda (nif env)
+    (cases nested-if nif
+      [nested-if-stmt (test blk opt)
+        (let ([cond (value-of-expr test env)])
+          (if (truthy? cond)
+              (value-of-block blk env)
+              (cases opt-else opt
+                [else-some (eb)
+                  (cases else-body eb
+                    [else-block (b2) (value-of-block b2 env)]
+                    [else-if   (nested2) (value-of-nested-if nested2 env)])]
+                [no-else () (cons #f env)])))])))
+
+;; -------- Expression evaluation --------
 (define value-of-expr
   (lambda (e env)
     (cases expression e
@@ -280,6 +360,7 @@
     (cases factor f
       [num-factor (n) n]
       [bool-factor (b) (if (eq? b 'true) #t #f)]
+      [not-factor (g) (not (truthy? (value-of-factor g env)))]
       [group-factor (e) (value-of-expr e env)]
       [neg-factor (g) (- (value-of-factor g env))]
       [id-or-call (id tail)
@@ -302,7 +383,6 @@
         (when (not (= (length params) (length args)))
           (eopl:error 'apply "arity mismatch: expected ~a args, got ~a"
                       (length params) (length args)))
-        ;; Make the function visible under its own name in its body (recursion).
         (let* ([base-env (extend-env name proc-val saved-env)]
                [new-env  (extend-env-multiple params args base-env)])
           (->js (value-of-expr body new-env)))])))
@@ -324,7 +404,6 @@
          [vals (value-of-program pgm)])
     (for-each
      (lambda (v)
-       ;; Skip printing closures if you prefer only numeric/boolean outputs:
        (unless (proc? v)
          (display v)
          (newline)))
