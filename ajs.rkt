@@ -1,8 +1,7 @@
 #lang eopl
 
 ;; =========================================
-;; AJS Interpreter — Part 4:
-;; Arithmetic + Constants + Functions + Booleans/Conditionals + Recursion
+;; AJS Interpreter
 ;; =========================================
 
 ;; -------- Lexer --------
@@ -12,7 +11,7 @@
     ;; numbers
     (number (digit (arbno digit)) number)
     (number ((arbno digit) "." digit (arbno digit)) number)
-    ;; booleans: return 'true or 'false as symbols
+    ;; booleans
     (bool ((or "true" "false")) symbol)
     ;; identifiers: [A-Za-z][A-Za-z0-9_]* (allow underscore after first letter)
     (identifier
@@ -31,54 +30,48 @@
         "_")))
      symbol)))
 
+
 ;; -------- Grammar --------
 (define ajs-grammar
   '(
     (program ((arbno toplevel)) a-program)
 
-    ;; Top-level accepts either:
-    ;;   - a simple statement followed by ";"
-    ;;   - a compound statement (no ";")
+    ;; Toplevel: either simple stmt, compound stmt, or function
     (toplevel (simple-stmt ";") top-simple)
     (toplevel (compound-stmt) top-comp)
     (toplevel (fun-decl) fun-item)
 
-    ;; Simple statements (must end with ";")
+    ;; Simple statements
     (simple-stmt ("const" identifier "=" expression) const-decl)
     (simple-stmt (expression) expr-stmt)
+    (simple-stmt (";") skip-stmt) ;; tolerate stray semicolons
 
-    ;; Compound statements (no trailing ";")
+    ;; Compound
     (compound-stmt ("if" "(" expression ")" block opt-else) if-stmt)
     (compound-stmt (block) block-stmt)
 
-    ;; Left-factored optional else to avoid LL(1) conflict on "else"
     (opt-else ("else" else-body) else-some)
     (opt-else () no-else)
 
-    ;; After "else", we either have a block or a nested if
     (else-body (block) else-block)
     (else-body (nested-if) else-if)
-
-    ;; Nested if is itself a compound shape
     (nested-if ("if" "(" expression ")" block opt-else) nested-if-stmt)
 
-    ;; Blocks contain a sequence of either simple-stmt ";" or compound-stmt
     (block ("{" (arbno block-item) "}") a-block)
     (block-item (simple-stmt ";") blk-simple)
     (block-item (compound-stmt) blk-comp)
 
-    ;; Function declarations (no trailing semicolon!)
+    ;; Functions
     (fun-decl
       ("function" identifier "(" (separated-list identifier ",") ")"
        "{" "return" expression ";" "}") a-fun-decl)
 
-    ;; -------- Expressions with booleans/conditionals and + / - --------
+    ;; Expressions
     (expression (additive maybe-ternary) an-expr)
-
     (maybe-ternary ("?" expression ":" expression) ternary-expr)
     (maybe-ternary () no-ternary)
 
-    ;; + / - with lower precedence than ||, &&, comparisons
+    ;; + / - have lower precedence than ||, &&
     (additive (logic-or additive+) a-additive)
     (additive+ ("+" logic-or additive+) add-more)
     (additive+ ("-" logic-or additive+) sub-more)
@@ -88,7 +81,6 @@
     (logic-or (logic-and logic-or+) a-logic-or)
     (logic-or+ ("||" logic-and logic-or+) or-more)
     (logic-or+ () no-or)
-
     (logic-and (comparison logic-and+) a-logic-and)
     (logic-and+ ("&&" comparison logic-and+) and-more)
     (logic-and+ () no-and)
@@ -103,7 +95,7 @@
     (maybe-comp ("!=" term) ne-comp)
     (maybe-comp () no-comp)
 
-    ;; arithmetic terms
+    ;; arithmetic
     (term (factor term+) a-term)
     (term+ ("*" factor term+) mul-term)
     (term+ ("/" factor term+) div-term)
@@ -120,27 +112,20 @@
     (id-tail () empty-id-tail)
    ))
 
+
 ;; -------- SLLGEN boilerplate --------
 (sllgen:make-define-datatypes ajs-lex ajs-grammar)
+(define show-the-datatypes (lambda () (sllgen:list-define-datatypes ajs-lex ajs-grammar)))
+(define scan&parse (sllgen:make-string-parser ajs-lex ajs-grammar))
 
-(define show-the-datatypes
-  (lambda () (sllgen:list-define-datatypes ajs-lex ajs-grammar)))
-
-(define scan&parse
-  (sllgen:make-string-parser ajs-lex ajs-grammar))
 
 ;; -------- Environment utilities --------
 (define empty-env '())
-
-(define extend-env
-  (lambda (var val env)
-    (cons (cons var val) env)))
-
+(define extend-env (lambda (var val env) (cons (cons var val) env)))
 (define apply-env
   (lambda (env var)
-    (cond
-      [(assq var env) => cdr]
-      [else (eopl:error 'apply-env "Unbound identifier ~a" var)])))
+    (cond [(assq var env) => cdr]
+          [else (eopl:error 'apply-env "Unbound identifier ~a" var)])))
 
 (define extend-env-multiple
   (lambda (params args env)
@@ -149,6 +134,7 @@
         (extend-env (car params) (car args)
                     (extend-env-multiple (cdr params) (cdr args) env)))))
 
+
 ;; -------- Numeric helper --------
 (define ->js
   (lambda (n)
@@ -156,19 +142,20 @@
       [(and (rational? n) (not (integer? n))) (exact->inexact n)]
       [else n])))
 
-;; -------- Procedure datatype (with self-name for recursion) --------
+
+;; -------- Procedure datatype --------
 (define-datatype proc proc?
-  [closure (name symbol?)                       ; function's own identifier
+  [closure (name symbol?)
            (params (list-of symbol?))
-           (body (lambda (x) #t))               ; accept any AST node as body
+           (body (lambda (x) #t))
            (env list?)])
+
 
 ;; -------- Interpreter --------
 (define value-of-program
   (lambda (pgm)
     (cases program pgm
-      [a-program (items)
-        (value-of-toplevels items empty-env)])))
+      [a-program (items) (value-of-toplevels items empty-env)])))
 
 (define value-of-toplevels
   (lambda (lst env)
@@ -192,9 +179,9 @@
   (lambda (fd env)
     (cases fun-decl fd
       [a-fun-decl (id params body)
-        ;; Self-binding closure for recursion
         (letrec ([val (closure id params body env)])
           (cons val (extend-env id val env)))])))
+
 
 ;; ----- Blocks -----
 (define value-of-block
@@ -208,9 +195,9 @@
     (if (null? items)
         (cons #f env)
         (let* ([first (car items)]
-               [rest  (cdr items)]
+               [rest (cdr items)]
                [res+env (value-of-block-item first env)]
-               [val     (car res+env)]
+               [val (car res+env)]
                [new-env (cdr res+env)])
           (if (null? rest)
               (cons val new-env)
@@ -222,15 +209,17 @@
       [blk-simple (st) (value-of-simple-stmt st env)]
       [blk-comp   (cs) (value-of-compound-stmt cs env)])))
 
+
 ;; ----- Statements -----
 (define value-of-simple-stmt
   (lambda (st env)
     (cases simple-stmt st
       [const-decl (id exp)
         (let ([val (->js (value-of-expr exp env))])
-          (cons val (extend-env id val env)))]
+          (cons (cons id val) (extend-env id val env)))]
       [expr-stmt (e)
-        (cons (->js (value-of-expr e env)) env)])))
+        (cons (->js (value-of-expr e env)) env)]
+      [skip-stmt () (cons #f env)])))
 
 (define value-of-compound-stmt
   (lambda (cs env)
@@ -261,6 +250,7 @@
                     [else-if   (nested2) (value-of-nested-if nested2 env)])]
                 [no-else () (cons #f env)])))])))
 
+
 ;; -------- Expression evaluation --------
 (define value-of-expr
   (lambda (e env)
@@ -274,7 +264,8 @@
                   (value-of-expr false-expr env))]
             [no-ternary () val]))])))
 
-;; additive (+ / -)
+
+;; -------- Arithmetic / Logical --------
 (define value-of-additive
   (lambda (e env)
     (cases additive e
@@ -291,7 +282,7 @@
         (value-of-additive+ (- left (value-of-logic-or right env)) tail env)]
       [no-add () left])))
 
-;; logical OR / AND
+
 (define value-of-logic-or
   (lambda (e env)
     (cases logic-or e
@@ -324,7 +315,7 @@
             (value-of-logic-and+ (value-of-comparison right env) tail env))]
       [no-and () left])))
 
-;; comparisons
+
 (define value-of-comparison
   (lambda (e env)
     (cases comparison e
@@ -339,7 +330,7 @@
             [ne-comp (t2)  (not (equal? v1 (value-of-term t2 env)))]
             [no-comp () v1]))])))
 
-;; -------- Arithmetic evaluation --------
+
 (define value-of-term
   (lambda (tm env)
     (cases term tm
@@ -351,9 +342,9 @@
       [mul-term (f rest)
         (value-of-term+ (* acc (value-of-factor f env)) rest env)]
       [div-term (f rest)
-        (value-of-term+
-         (->js (/ acc (value-of-factor f env))) rest env)]
+        (value-of-term+ (->js (/ acc (value-of-factor f env))) rest env)]
       [empty-term () acc])))
+
 
 (define value-of-factor
   (lambda (f env)
@@ -371,21 +362,23 @@
                    [arg-vals (map (lambda (a) (value-of-expr a env)) args)])
               (apply-proc proc-val arg-vals))])])))
 
-;; -------- Boolean helpers --------
+
+;; -------- Helpers --------
 (define (truthy? v)
   (and v (not (eq? v #f))))
 
-;; -------- Procedure application (self-binding for recursion) --------
+
+;; -------- Procedure application (recursion supported) --------
 (define apply-proc
   (lambda (proc-val args)
     (cases proc proc-val
       [closure (name params body saved-env)
         (when (not (= (length params) (length args)))
-          (eopl:error 'apply "arity mismatch: expected ~a args, got ~a"
-                      (length params) (length args)))
+          (eopl:error 'apply "arity mismatch"))
         (let* ([base-env (extend-env name proc-val saved-env)]
                [new-env  (extend-env-multiple params args base-env)])
           (->js (value-of-expr body new-env)))])))
+
 
 ;; -------- Runner / REPL --------
 (define (ajs-run s)
@@ -398,15 +391,40 @@
           (list->string (reverse chars))
           (loop (cons c chars))))))
 
+(define (string-join strs sep)
+  (if (null? strs)
+      ""
+      (let loop ([ss (cdr strs)] [acc (car strs)])
+        (if (null? ss)
+            acc
+            (loop (cdr ss)
+                  (string-append acc sep (car ss)))))))
+
+
 (define (REPL)
   (let* ([input (read-all)]
          [pgm (scan&parse input)]
          [vals (value-of-program pgm)])
     (for-each
      (lambda (v)
-       (unless (proc? v)
-         (display v)
-         (newline)))
+       (cond
+         [(proc? v)
+          (cases proc v
+            [closure (name params body env)
+              (display "function ")
+              (display (symbol->string name))
+              (display "(")
+              (display (string-join (map symbol->string params) ", "))
+              (display ") defined")
+              (newline)])]
+         [(pair? v)
+          (display (symbol->string (car v)))
+          (display " = ")
+          (display (cdr v))
+          (newline)]
+         [else
+          (display v)
+          (newline)]))
      vals)))
 
 (REPL)
