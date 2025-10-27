@@ -29,21 +29,22 @@
      symbol)))
 
 ;; -------- Grammar --------
-;; Left-factored around identifier to avoid LL(1) conflict:
-;; factor -> identifier id-tail | ...
-;; id-tail -> "(" args ")" | ε
+;; Left-factor identifier to avoid LL(1) conflict.
 (define ajs-grammar
   '(
-    (program ((arbno statement ";")) a-program)
+    ;; Make each statement self-terminating:
+    ;;  - const ... ;
+    ;;  - expression ... ;
+    ;;  - function ... { return ... ; }
+    ;; Then the program is just a list of statements (no top-level separators).
+    (program ((arbno statement)) a-program)
 
     ;; Statements
-    (statement ("const" identifier "=" expression) const-decl)
+    (statement ("const" identifier "=" expression ";") const-decl)
     (statement
- ("function" identifier "(" (separated-list identifier ",") ")"
-  "{" "return" expression ";" "}") func-decl)
-
-    (statement (expression) expr-stmt)
-    (statement () empty-stmt)
+      ("function" identifier "(" (separated-list identifier ",") ")"
+       "{" "return" expression ";" "}") func-decl)
+    (statement (expression ";") expr-stmt)
 
     ;; Expressions
     (expression (term expression+) an-expr)
@@ -107,7 +108,7 @@
 ;; -------- Procedure datatype --------
 (define-datatype proc proc?
   [closure (params (list-of symbol?))
-           (body (lambda (x) #t))   ; accept any syntax node as body
+           (body (lambda (x) #t))   ; accept any AST node as body
            (env list?)])
 
 ;; -------- Interpreter --------
@@ -138,9 +139,7 @@
         (let ([val (closure params body env)])
           (cons val (extend-env id val env)))]
       [expr-stmt (e)
-        (cons (->js (value-of-expr e env)) env)]
-      [empty-stmt ()
-        (cons '() env)]))) ; ← added this
+        (cons (->js (value-of-expr e env)) env)])))
 
 (define value-of-expr
   (lambda (e env)
