@@ -401,8 +401,7 @@
                   (string-append acc sep (car ss)))))))
 
 
-;; -------- REPL (expression results only) --------
-;; -------- REPL (expression results only) --------
+;; -------- REPL --------
 (define (REPL)
   (let* ([input (read-all)]
          [pgm (scan&parse input)]
@@ -410,10 +409,8 @@
     (for-each
      (lambda (v)
        (cond
-         ;; Skip functions and declarations (return pairs)
          [(proc? v) '()]
          [(pair? v) '()]
-         ;; Only print pure evaluated values
          [else
           (display v)
           (newline)]))
