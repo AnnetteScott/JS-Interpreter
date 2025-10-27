@@ -1,13 +1,11 @@
 #lang eopl
 
 ;; =========================================
-;; AJS Interpreter — Part 1:
-;; Arithmetic + Constant Declarations
+;; AJS Interpreter — Part 2:
+;; Arithmetic + Constants + Functions
 ;; =========================================
 
 ;; -------- Lexer --------
-
-;; Define regex categories
 (define ajs-lex
   '((whitespace (whitespace) skip)
     (comment ("//" (arbno (not #\newline))) skip)
@@ -30,15 +28,22 @@
         "0" "1" "2" "3" "4" "5" "6" "7" "8" "9")))
      symbol)))
 
-
 ;; -------- Grammar --------
+;; Left-factored around identifier to avoid LL(1) conflict:
+;; factor -> identifier id-tail | ...
+;; id-tail -> "(" args ")" | ε
 (define ajs-grammar
   '(
     (program ((arbno statement ";")) a-program)
 
     ;; Statements
     (statement ("const" identifier "=" expression) const-decl)
+    (statement
+ ("function" identifier "(" (separated-list identifier ",") ")"
+  "{" "return" expression ";" "}") func-decl)
+
     (statement (expression) expr-stmt)
+    (statement () empty-stmt)
 
     ;; Expressions
     (expression (term expression+) an-expr)
@@ -52,9 +57,12 @@
     (term+ () empty-term)
 
     (factor (number) num-factor)
-    (factor (identifier) id-factor)
+    (factor (identifier id-tail) id-or-call)
     (factor ("(" expression ")") group-factor)
     (factor ("-" factor) neg-factor)
+
+    (id-tail ("(" (separated-list expression ",") ")") call-tail)
+    (id-tail () empty-id-tail)
    ))
 
 ;; -------- SLLGEN boilerplate --------
@@ -80,7 +88,14 @@
   (lambda (env var)
     (cond
       [(assq var env) => cdr]
-      [else (eopl:error 'apply-env "Unbound variable ~a" var)])))
+      [else (eopl:error 'apply-env "Unbound identifier ~a" var)])))
+
+(define extend-env-multiple
+  (lambda (params args env)
+    (if (null? params)
+        env
+        (extend-env (car params) (car args)
+                    (extend-env-multiple (cdr params) (cdr args) env)))))
 
 ;; -------- Numeric helper --------
 (define ->js
@@ -88,6 +103,12 @@
     (cond
       [(and (rational? n) (not (integer? n))) (exact->inexact n)]
       [else n])))
+
+;; -------- Procedure datatype --------
+(define-datatype proc proc?
+  [closure (params (list-of symbol?))
+           (body (lambda (x) #t))   ; accept any syntax node as body
+           (env list?)])
 
 ;; -------- Interpreter --------
 (define value-of-program
@@ -113,8 +134,13 @@
       [const-decl (id exp)
         (let ([val (->js (value-of-expr exp env))])
           (cons val (extend-env id val env)))]
+      [func-decl (id params body)
+        (let ([val (closure params body env)])
+          (cons val (extend-env id val env)))]
       [expr-stmt (e)
-        (cons (->js (value-of-expr e env)) env)])))
+        (cons (->js (value-of-expr e env)) env)]
+      [empty-stmt ()
+        (cons '() env)]))) ; ← added this
 
 (define value-of-expr
   (lambda (e env)
@@ -150,9 +176,27 @@
   (lambda (f env)
     (cases factor f
       [num-factor (n) n]
-      [id-factor (id) (apply-env env id)]
       [group-factor (e) (value-of-expr e env)]
-      [neg-factor (g) (- (value-of-factor g env))])))
+      [neg-factor (g) (- (value-of-factor g env))]
+      [id-or-call (id tail)
+        (cases id-tail tail
+          [empty-id-tail ()
+            (apply-env env id)]
+          [call-tail (args)
+            (let* ([proc-val (apply-env env id)]
+                   [arg-vals (map (lambda (a) (value-of-expr a env)) args)])
+              (apply-proc proc-val arg-vals))])])))
+
+;; -------- Procedure application --------
+(define apply-proc
+  (lambda (proc-val args)
+    (cases proc proc-val
+      [closure (params body saved-env)
+        (when (not (= (length params) (length args)))
+          (eopl:error 'apply "arity mismatch: expected ~a args, got ~a"
+                      (length params) (length args)))
+        (let ([new-env (extend-env-multiple params args saved-env)])
+          (->js (value-of-expr body new-env)))])))
 
 ;; -------- Runner / REPL --------
 (require racket/format)
@@ -171,5 +215,4 @@
         (value-of-program pgm)))
      parse-stream)))
 
-;; Uncomment to start REPL automatically
 (REPL)
