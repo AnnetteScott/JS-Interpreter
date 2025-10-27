@@ -1,8 +1,8 @@
 #lang eopl
 
 ;; =========================================
-;; AJS Interpreter — Part 3:
-;; Booleans + Conditionals
+;; AJS Interpreter — Part 4:
+;; Arithmetic + Constants + Functions + Booleans/Conditionals + Recursion
 ;; =========================================
 
 ;; -------- Lexer --------
@@ -49,26 +49,26 @@
       ("function" identifier "(" (separated-list identifier ",") ")"
        "{" "return" expression ";" "}") a-fun-decl)
 
-    ;; -------- Expressions with booleans/conditionals --------
-(expression (additive maybe-ternary) an-expr)
+    ;; -------- Expressions with booleans/conditionals and + / - --------
+    (expression (additive maybe-ternary) an-expr)
 
-(maybe-ternary ("?" expression ":" expression) ternary-expr)
-(maybe-ternary () no-ternary)
+    (maybe-ternary ("?" expression ":" expression) ternary-expr)
+    (maybe-ternary () no-ternary)
 
-;; logical OR / AND
-(additive (logic-or additive+) a-additive)
-(additive+ ("+" logic-or additive+) add-more)
-(additive+ ("-" logic-or additive+) sub-more)
-(additive+ () no-add)
+    ;; + / - with lower precedence than ||, &&, comparisons
+    (additive (logic-or additive+) a-additive)
+    (additive+ ("+" logic-or additive+) add-more)
+    (additive+ ("-" logic-or additive+) sub-more)
+    (additive+ () no-add)
 
-(logic-or (logic-and logic-or+) a-logic-or)
-(logic-or+ ("||" logic-and logic-or+) or-more)
-(logic-or+ () no-or)
+    ;; logical OR / AND
+    (logic-or (logic-and logic-or+) a-logic-or)
+    (logic-or+ ("||" logic-and logic-or+) or-more)
+    (logic-or+ () no-or)
 
-(logic-and (comparison logic-and+) a-logic-and)
-(logic-and+ ("&&" comparison logic-and+) and-more)
-(logic-and+ () no-and)
-
+    (logic-and (comparison logic-and+) a-logic-and)
+    (logic-and+ ("&&" comparison logic-and+) and-more)
+    (logic-and+ () no-and)
 
     ;; comparisons
     (comparison (term maybe-comp) a-comparison)
@@ -132,10 +132,11 @@
       [(and (rational? n) (not (integer? n))) (exact->inexact n)]
       [else n])))
 
-;; -------- Procedure datatype --------
+;; -------- Procedure datatype (with self-name for recursion) --------
 (define-datatype proc proc?
-  [closure (params (list-of symbol?))
-           (body (lambda (x) #t))   ; accept any AST node as body
+  [closure (name symbol?)                       ; function's own identifier
+           (params (list-of symbol?))
+           (body (lambda (x) #t))               ; accept any AST node as body
            (env list?)])
 
 ;; -------- Interpreter --------
@@ -166,7 +167,8 @@
   (lambda (fd env)
     (cases fun-decl fd
       [a-fun-decl (id params body)
-        (let ([val (closure params body env)])
+        ;; Create closure first (temporarily) — placeholder for recursion.
+        (letrec ([val (closure id params body env)]) ; recursive self-binding
           (cons val (extend-env id val env)))])))
 
 (define value-of-statement
@@ -192,6 +194,24 @@
                   (value-of-expr false-expr env))]
             [no-ternary () val]))])))
 
+;; additive (+ / -)
+(define value-of-additive
+  (lambda (e env)
+    (cases additive e
+      [a-additive (left rest)
+        (let ([v (value-of-logic-or left env)])
+          (value-of-additive+ v rest env))])))
+
+(define value-of-additive+
+  (lambda (left rest env)
+    (cases additive+ rest
+      [add-more (right tail)
+        (value-of-additive+ (+ left (value-of-logic-or right env)) tail env)]
+      [sub-more (right tail)
+        (value-of-additive+ (- left (value-of-logic-or right env)) tail env)]
+      [no-add () left])))
+
+;; logical OR / AND
 (define value-of-logic-or
   (lambda (e env)
     (cases logic-or e
@@ -224,23 +244,7 @@
             (value-of-logic-and+ (value-of-comparison right env) tail env))]
       [no-and () left])))
 
-(define value-of-additive
-  (lambda (e env)
-    (cases additive e
-      [a-additive (left rest)
-        (let ([v (value-of-logic-or left env)])
-          (value-of-additive+ v rest env))])))
-
-(define value-of-additive+
-  (lambda (left rest env)
-    (cases additive+ rest
-      [add-more (right tail)
-        (value-of-additive+ (+ left (value-of-logic-or right env)) tail env)]
-      [sub-more (right tail)
-        (value-of-additive+ (- left (value-of-logic-or right env)) tail env)]
-      [no-add () left])))
-
-
+;; comparisons
 (define value-of-comparison
   (lambda (e env)
     (cases comparison e
@@ -254,7 +258,6 @@
             [eq-comp (t2)  (equal? v1 (value-of-term t2 env))]
             [ne-comp (t2)  (not (equal? v1 (value-of-term t2 env)))]
             [no-comp () v1]))])))
-
 
 ;; -------- Arithmetic evaluation --------
 (define value-of-term
@@ -291,15 +294,17 @@
 (define (truthy? v)
   (and v (not (eq? v #f))))
 
-;; -------- Procedure application --------
+;; -------- Procedure application (self-binding for recursion) --------
 (define apply-proc
   (lambda (proc-val args)
     (cases proc proc-val
-      [closure (params body saved-env)
+      [closure (name params body saved-env)
         (when (not (= (length params) (length args)))
           (eopl:error 'apply "arity mismatch: expected ~a args, got ~a"
                       (length params) (length args)))
-        (let ([new-env (extend-env-multiple params args saved-env)])
+        ;; Make the function visible under its own name in its body (recursion).
+        (let* ([base-env (extend-env name proc-val saved-env)]
+               [new-env  (extend-env-multiple params args base-env)])
           (->js (value-of-expr body new-env)))])))
 
 ;; -------- Runner / REPL --------
@@ -319,6 +324,7 @@
          [vals (value-of-program pgm)])
     (for-each
      (lambda (v)
+       ;; Skip printing closures if you prefer only numeric/boolean outputs:
        (unless (proc? v)
          (display v)
          (newline)))
