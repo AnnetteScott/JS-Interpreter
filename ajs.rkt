@@ -222,14 +222,14 @@
           (loop (cons c chars))))))
 
 (define (REPL)
-  (display "Enter your AJS program, then press Ctrl+D (Linux/macOS) or Ctrl+Z (Windows) to run:\n")
   (let* ([input (read-all)]
          [pgm (scan&parse input)]
          [vals (value-of-program pgm)])
     (for-each
      (lambda (v)
-       (display v)
-       (newline))
+       (unless (proc? v)         ; don't show closure values
+         (display v)
+         (newline)))
      vals)))
 
 (REPL)
