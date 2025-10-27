@@ -12,7 +12,7 @@
     ;; numbers
     (number (digit (arbno digit)) number)
     (number ((arbno digit) "." digit (arbno digit)) number)
-    ;; identifiers  [A-Za-z][A-Za-z0-9]*
+    ;; identifiers: [A-Za-z][A-Za-z0-9_]*  (allow underscore after first letter)
     (identifier
      ((or
        "a" "b" "c" "d" "e" "f" "g" "h" "i" "j" "k" "l" "m" "n" "o" "p" "q" "r"
@@ -25,26 +25,27 @@
         "s" "t" "u" "v" "w" "x" "y" "z"
         "A" "B" "C" "D" "E" "F" "G" "H" "I" "J" "K" "L" "M" "N" "O" "P" "Q" "R"
         "S" "T" "U" "V" "W" "X" "Y" "Z"
-        "0" "1" "2" "3" "4" "5" "6" "7" "8" "9")))
+        "0" "1" "2" "3" "4" "5" "6" "7" "8" "9"
+        "_")))
      symbol)))
 
 ;; -------- Grammar --------
-;; Left-factor identifier to avoid LL(1) conflict.
 (define ajs-grammar
   '(
-    ;; Make each statement self-terminating:
-    ;;  - const ... ;
-    ;;  - expression ... ;
-    ;;  - function ... { return ... ; }
-    ;; Then the program is just a list of statements (no top-level separators).
-    (program ((arbno statement)) a-program)
+    (program ((arbno toplevel)) a-program)
+
+    ;; A toplevel item can be either a statement ending with ";" or a function decl
+    (toplevel (statement ";") stmt-item)
+    (toplevel (fun-decl) fun-item)
 
     ;; Statements
-    (statement ("const" identifier "=" expression ";") const-decl)
-    (statement
+    (statement ("const" identifier "=" expression) const-decl)
+    (statement (expression) expr-stmt)
+
+    ;; Function declarations (no trailing semicolon!)
+    (fun-decl
       ("function" identifier "(" (separated-list identifier ",") ")"
-       "{" "return" expression ";" "}") func-decl)
-    (statement (expression ";") expr-stmt)
+       "{" "return" expression ";" "}") a-fun-decl)
 
     ;; Expressions
     (expression (term expression+) an-expr)
@@ -74,9 +75,6 @@
 
 (define scan&parse
   (sllgen:make-string-parser ajs-lex ajs-grammar))
-
-(define parse-stream
-  (sllgen:make-stream-parser ajs-lex ajs-grammar))
 
 ;; -------- Environment utilities --------
 (define empty-env '())
@@ -115,19 +113,34 @@
 (define value-of-program
   (lambda (pgm)
     (cases program pgm
-      [a-program (stmt-list)
-        (value-of-statements stmt-list empty-env)])))
+      [a-program (items)
+        (value-of-toplevels items empty-env)])))
 
-(define value-of-statements
-  (lambda (stmts env)
-    (if (null? stmts)
+(define value-of-toplevels
+  (lambda (lst env)
+    (if (null? lst)
         '()
-        (let* ([stmt (car stmts)]
-               [rest (cdr stmts)]
-               [result+env (value-of-statement stmt env)]
+        (let* ([item (car lst)]
+               [rest (cdr lst)]
+               [result+env (value-of-toplevel item env)]
                [val (car result+env)]
                [new-env (cdr result+env)])
-          (cons val (value-of-statements rest new-env))))))
+          (cons val (value-of-toplevels rest new-env))))))
+
+(define value-of-toplevel
+  (lambda (it env)
+    (cases toplevel it
+      [stmt-item (st)
+        (value-of-statement st env)]
+      [fun-item (fd)
+        (value-of-fun-decl fd env)])))
+
+(define value-of-fun-decl
+  (lambda (fd env)
+    (cases fun-decl fd
+      [a-fun-decl (id params body)
+        (let ([val (closure params body env)])
+          (cons val (extend-env id val env)))])))
 
 (define value-of-statement
   (lambda (st env)
@@ -135,12 +148,10 @@
       [const-decl (id exp)
         (let ([val (->js (value-of-expr exp env))])
           (cons val (extend-env id val env)))]
-      [func-decl (id params body)
-        (let ([val (closure params body env)])
-          (cons val (extend-env id val env)))]
       [expr-stmt (e)
         (cons (->js (value-of-expr e env)) env)])))
 
+;; -------- Expression evaluation --------
 (define value-of-expr
   (lambda (e env)
     (cases expression e
@@ -198,20 +209,27 @@
           (->js (value-of-expr body new-env)))])))
 
 ;; -------- Runner / REPL --------
-(require racket/format)
 
 (define (ajs-run s)
   (value-of-program (scan&parse s)))
 
+;; Read all characters until EOF (EOPL-safe)
+(define (read-all)
+  (let loop ([chars '()])
+    (let ([c (read-char)])
+      (if (eof-object? c)
+          (list->string (reverse chars))
+          (loop (cons c chars))))))
+
 (define (REPL)
-  ((sllgen:make-rep-loop
-     "AJS> "
-     (lambda (pgm)
-       (for-each
-        (lambda (v)
-          (display v)
-          (newline))
-        (value-of-program pgm)))
-     parse-stream)))
+  (display "Enter your AJS program, then press Ctrl+D (Linux/macOS) or Ctrl+Z (Windows) to run:\n")
+  (let* ([input (read-all)]
+         [pgm (scan&parse input)]
+         [vals (value-of-program pgm)])
+    (for-each
+     (lambda (v)
+       (display v)
+       (newline))
+     vals)))
 
 (REPL)
