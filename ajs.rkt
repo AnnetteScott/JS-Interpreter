@@ -2,6 +2,8 @@
 
 ;; =========================================
 ;; AJS Interpreter
+;; Author: Annette Scott
+;; ID: 21146499
 ;; =========================================
 
 ;; -------- Lexer --------
@@ -13,6 +15,8 @@
     (number ((arbno digit) "." digit (arbno digit)) number)
     ;; booleans
     (bool ((or "true" "false")) symbol)
+    ;; strings
+	(string ("\"" (arbno (or (not #\") "\\\"")) "\"") string)
     ;; identifiers: [A-Za-z][A-Za-z0-9_]* (allow underscore after first letter)
     (identifier
      ((or
@@ -103,6 +107,7 @@
 
     (factor (number) num-factor)
     (factor (bool) bool-factor)
+    (factor (string) str-factor)
     (factor (identifier id-tail) id-or-call)
     (factor ("(" expression ")") group-factor)
     (factor ("-" factor) neg-factor)
@@ -135,7 +140,15 @@
                     (extend-env-multiple (cdr params) (cdr args) env)))))
 
 
-;; -------- Numeric helper --------
+;; -------- Helper --------
+;; Convert any value to string
+(define (->string v)
+  (cond
+    [(string? v) v]
+    [(boolean? v) (if v "true" "false")]
+    [else (number->string v)]))
+
+
 (define ->js
   (lambda (n)
     (cond
@@ -277,10 +290,22 @@
   (lambda (left rest env)
     (cases additive+ rest
       [add-more (right tail)
-        (value-of-additive+ (+ left (value-of-logic-or right env)) tail env)]
+        (let* ([rval (value-of-logic-or right env)]
+               [sum (cond
+                      ;; if either is string → concatenate
+                      [(or (string? left) (string? rval))
+                       (string-append (->string left) (->string rval))]
+                      [else
+                       (+ left rval)])])
+          (value-of-additive+ sum tail env))]
+
       [sub-more (right tail)
-        (value-of-additive+ (- left (value-of-logic-or right env)) tail env)]
+        (let* ([rval (value-of-logic-or right env)]
+               [diff (- left rval)])
+          (value-of-additive+ diff tail env))]
+
       [no-add () left])))
+
 
 
 (define value-of-logic-or
@@ -346,29 +371,71 @@
       [empty-term () acc])))
 
 
+;; -------- Expression Factors --------
 (define value-of-factor
   (lambda (f env)
     (cases factor f
+      ;; Numeric literal
       [num-factor (n) n]
-      [bool-factor (b) (if (eq? b 'true) #t #f)]
-      [not-factor (g) (not (truthy? (value-of-factor g env)))]
-      [group-factor (e) (value-of-expr e env)]
-      [neg-factor (g) (- (value-of-factor g env))]
+
+      ;; Boolean literal
+      [bool-factor (b)
+        (if (eq? b 'true) #t #f)]
+
+      ;; String literal (no regex dependencies)
+      [str-factor (s)
+  ;; s is already a string, not a symbol
+  (let* ([raw (if (symbol? s) (symbol->string s) s)]
+         [len (string-length raw)]
+         [trimmed (if (>= len 2)
+                      (substring raw 1 (- len 1))
+                      raw)])
+    ;; simple unescape for \"
+    (list->string
+     (reverse
+      (let loop ([chars (string->list trimmed)] [acc '()])
+        (cond
+          [(null? chars) acc]
+          [(and (pair? (cdr chars))
+                (char=? (car chars) #\\)
+                (char=? (cadr chars) #\")) ; handle \"
+           (loop (cddr chars) (cons #\" acc))]
+          [else
+           (loop (cdr chars) (cons (car chars) acc))])))))]
+
+
+      ;; Logical NOT
+      [not-factor (g)
+        (not (truthy? (value-of-factor g env)))]
+
+      ;; Grouped expression: (expr)
+      [group-factor (e)
+        (value-of-expr e env)]
+
+      ;; Unary negation
+      [neg-factor (g)
+        (- (value-of-factor g env))]
+
+      ;; Variable reference or function call
       [id-or-call (id tail)
         (cases id-tail tail
-          [empty-id-tail () (apply-env env id)]
+          [empty-id-tail ()
+            (apply-env env id)]
           [call-tail (args)
             (let* ([proc-val (apply-env env id)]
-                   [arg-vals (map (lambda (a) (value-of-expr a env)) args)])
+                   [arg-vals (map (lambda (a)
+                                    (value-of-expr a env))
+                                  args)])
               (apply-proc proc-val arg-vals))])])))
 
 
-;; -------- Helpers --------
+
+
 (define (truthy? v)
   (and v (not (eq? v #f))))
 
 
-;; -------- Procedure application (recursion supported) --------
+;; -------- Procedure application --------
 (define apply-proc
   (lambda (proc-val args)
     (cases proc proc-val
